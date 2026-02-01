@@ -1,6 +1,6 @@
 [package]
 name = "nl-wireguard"
-version = "0.2.9"
+version = "0.1.0"
 authors = ["Gris Ge <fge@redhat.com>"]
 license = "MIT"
 edition = "2021"
