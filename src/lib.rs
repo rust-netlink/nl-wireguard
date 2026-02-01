@@ -6,22 +6,31 @@
 //! To query wireguard interface:
 //!
 //! ```no_run
-//! async fn print_wireguard_config(iface_name: &str) {
-//!     let (conn, mut handle, _) = nl_wireguard::new_connection().unwrap();
+//! async fn print_wireguard_config(
+//!     iface_name: &str,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
+//!     let (conn, mut handle, _) = nl_wireguard::new_connection()?;
 //!     tokio::spawn(conn);
 //!
-//!     println!("{:?}", handle.get_by_name(iface_name).await.unwrap());
+//!     println!("{:?}", handle.get_by_name(iface_name).await?);
+//!     Ok(())
 //! }
 //! ```
 //!
 //! To set wireguard configuration.
+//! You need to use `rtnetlink` crate to create a interface with `wireguard`
+//! interface type before.
 //!
 //! ```no_run
 //! use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-//! use nl_wireguard::{
-//!     WireguardPeerParsed, WireguardParsed, WireguardIpAddress};
 //!
-//! async fn set_wireguard_config(iface_name: &str) {
+//! use nl_wireguard::{
+//!     WireguardIpAddress, WireguardParsed, WireguardPeerParsed
+//! };
+//!
+//! async fn set_wireguard_config(
+//!     iface_name: &str,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut peer_config = WireguardPeerParsed::default();
 //!     peer_config.endpoint = Some(SocketAddr::new(
 //!         IpAddr::V4(Ipv4Addr::new(10, 10, 10, 1)),
@@ -50,9 +59,10 @@
 //!     config.fwmark = Some(0);
 //!     config.peers = Some(vec![peer_config]);
 //!
-//!     let (conn, mut handle, _) = nl_wireguard::new_connection().unwrap();
+//!     let (conn, mut handle, _) = nl_wireguard::new_connection()?;
 //!     tokio::spawn(conn);
-//!     handle.set(config).await.unwrap();
+//!     handle.set(config).await?;
+//!     Ok(())
 //! }
 //! ```
 
