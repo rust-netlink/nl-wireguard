@@ -7,6 +7,7 @@ use std::{
 };
 
 use base64::{prelude::BASE64_STANDARD, Engine};
+use netlink_packet_wireguard::{WireguardAllowedIpFlags, WireguardPeerFlags};
 
 use super::parsed::decode_key;
 use crate::{
@@ -14,6 +15,47 @@ use crate::{
     WireguardAllowedIpAttr, WireguardError, WireguardPeer,
     WireguardPeerAttribute, WireguardTimeSpec,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum WireguardParsedPeerFlags {
+    RemoveMe,
+    ReplaceAllowedIps,
+    UpdateOnly,
+    Other(u32),
+}
+
+impl From<WireguardParsedPeerFlags> for WireguardPeerFlags {
+    fn from(flag: WireguardParsedPeerFlags) -> Self {
+        match flag {
+            WireguardParsedPeerFlags::RemoveMe => WireguardPeerFlags::RemoveMe,
+            WireguardParsedPeerFlags::ReplaceAllowedIps => {
+                WireguardPeerFlags::ReplaceAllowedIps
+            }
+            WireguardParsedPeerFlags::UpdateOnly => {
+                WireguardPeerFlags::UpdateOnly
+            }
+            WireguardParsedPeerFlags::Other(bits) => {
+                WireguardPeerFlags::from_bits_retain(bits)
+            }
+        }
+    }
+}
+
+impl From<WireguardPeerFlags> for WireguardParsedPeerFlags {
+    fn from(flag: WireguardPeerFlags) -> Self {
+        match flag {
+            WireguardPeerFlags::RemoveMe => WireguardParsedPeerFlags::RemoveMe,
+            WireguardPeerFlags::ReplaceAllowedIps => {
+                WireguardParsedPeerFlags::ReplaceAllowedIps
+            }
+            WireguardPeerFlags::UpdateOnly => {
+                WireguardParsedPeerFlags::UpdateOnly
+            }
+            _ => WireguardParsedPeerFlags::Other(flag.bits()),
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -31,7 +73,7 @@ pub struct WireguardPeerParsed {
     pub tx_bytes: Option<u64>,
     pub allowed_ips: Option<Vec<WireguardIpAddress>>,
     pub protocol_version: Option<u32>,
-    // TODO: Flags
+    pub flags: Option<Vec<WireguardParsedPeerFlags>>,
 }
 
 // For simplifying the code on hide `preshared_key` in Debug display of
@@ -48,6 +90,7 @@ struct _WireguardPeerParsed<'a> {
     tx_bytes: &'a Option<u64>,
     allowed_ips: &'a Option<Vec<WireguardIpAddress>>,
     protocol_version: &'a Option<u32>,
+    flags: &'a Option<Vec<WireguardParsedPeerFlags>>,
 }
 
 impl std::fmt::Debug for WireguardPeerParsed {
@@ -65,6 +108,7 @@ impl std::fmt::Debug for WireguardPeerParsed {
             tx_bytes,
             allowed_ips,
             protocol_version,
+            flags,
         } = self;
 
         std::fmt::Debug::fmt(
@@ -82,6 +126,7 @@ impl std::fmt::Debug for WireguardPeerParsed {
                 tx_bytes,
                 allowed_ips,
                 protocol_version,
+                flags,
             },
             f,
         )
@@ -142,6 +187,13 @@ impl From<WireguardPeer> for WireguardPeerParsed {
                         }
                     }
                     ret.allowed_ips = Some(ips.into_iter().collect());
+                }
+                WireguardPeerAttribute::Flags(flag_bits) => {
+                    let mut flags = Vec::new();
+                    for flag_bit in flag_bits.iter() {
+                        flags.push(WireguardParsedPeerFlags::from(flag_bit));
+                    }
+                    ret.flags = Some(flags);
                 }
                 _ => {
                     log::debug!("Unsupported WireguardPeerAttribute {attr:?}");
@@ -210,7 +262,44 @@ impl WireguardPeerParsed {
             attrs.push(WireguardPeerAttribute::ProtocolVersion(v));
         }
 
+        if let Some(flags) = self.flags.as_ref() {
+            let flag_bits =
+                flags.iter().map(|&f| WireguardPeerFlags::from(f)).collect();
+            attrs.push(WireguardPeerAttribute::Flags(flag_bits));
+        }
+
         Ok(WireguardPeer(attrs))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum WireguardParsedAllowedIpFlags {
+    RemoveMe,
+    Other(u32),
+}
+
+impl From<WireguardParsedAllowedIpFlags> for WireguardAllowedIpFlags {
+    fn from(flag: WireguardParsedAllowedIpFlags) -> Self {
+        match flag {
+            WireguardParsedAllowedIpFlags::RemoveMe => {
+                WireguardAllowedIpFlags::RemoveMe
+            }
+            WireguardParsedAllowedIpFlags::Other(bits) => {
+                WireguardAllowedIpFlags::from_bits_retain(bits)
+            }
+        }
+    }
+}
+
+impl From<WireguardAllowedIpFlags> for WireguardParsedAllowedIpFlags {
+    fn from(flag: WireguardAllowedIpFlags) -> Self {
+        match flag {
+            WireguardAllowedIpFlags::RemoveMe => {
+                WireguardParsedAllowedIpFlags::RemoveMe
+            }
+            _ => WireguardParsedAllowedIpFlags::Other(flag.bits()),
+        }
     }
 }
 
@@ -218,6 +307,7 @@ impl WireguardPeerParsed {
 pub struct WireguardIpAddress {
     pub prefix_length: u8,
     pub ip_addr: IpAddr,
+    pub flags: Option<Vec<WireguardParsedAllowedIpFlags>>,
 }
 
 impl TryFrom<&WireguardAllowedIp> for WireguardIpAddress {
@@ -226,12 +316,22 @@ impl TryFrom<&WireguardAllowedIp> for WireguardIpAddress {
     fn try_from(attrs: &WireguardAllowedIp) -> Result<Self, WireguardError> {
         let mut ip_addr: Option<IpAddr> = None;
         let mut prefix_length: Option<u8> = None;
+        let mut flags: Option<Vec<WireguardParsedAllowedIpFlags>> = None;
 
         for attr in &attrs.0 {
             match attr {
                 WireguardAllowedIpAttr::IpAddr(v) => ip_addr = Some(*v),
                 WireguardAllowedIpAttr::Cidr(v) => prefix_length = Some(*v),
                 WireguardAllowedIpAttr::Family(_) => (),
+                WireguardAllowedIpAttr::Flags(flag_bits) => {
+                    let mut flag_vec = Vec::new();
+                    for flag_bit in flag_bits.iter() {
+                        flag_vec.push(WireguardParsedAllowedIpFlags::from(
+                            flag_bit,
+                        ));
+                    }
+                    flags = Some(flag_vec);
+                }
                 _ => {
                     log::debug!("Unsupported WireguardAllowedIpAttr {attr:?}");
                 }
@@ -242,6 +342,7 @@ impl TryFrom<&WireguardAllowedIp> for WireguardIpAddress {
                 Ok(Self {
                     ip_addr,
                     prefix_length,
+                    flags,
                 })
             } else {
                 Err(WireguardError::new(
@@ -266,14 +367,25 @@ impl TryFrom<&WireguardAllowedIp> for WireguardIpAddress {
 
 impl From<&WireguardIpAddress> for Vec<WireguardAllowedIpAttr> {
     fn from(ip: &WireguardIpAddress) -> Self {
-        vec![
-            WireguardAllowedIpAttr::Cidr(ip.prefix_length),
-            if ip.ip_addr.is_ipv4() {
-                WireguardAllowedIpAttr::Family(WireguardAddressFamily::Ipv4)
-            } else {
-                WireguardAllowedIpAttr::Family(WireguardAddressFamily::Ipv6)
-            },
-            WireguardAllowedIpAttr::IpAddr(ip.ip_addr),
-        ]
+        let mut result = Vec::with_capacity(4);
+        result.push(WireguardAllowedIpAttr::Cidr(ip.prefix_length));
+        if ip.ip_addr.is_ipv4() {
+            result.push(WireguardAllowedIpAttr::Family(
+                WireguardAddressFamily::Ipv4,
+            ));
+        } else {
+            result.push(WireguardAllowedIpAttr::Family(
+                WireguardAddressFamily::Ipv6,
+            ));
+        }
+        result.push(WireguardAllowedIpAttr::IpAddr(ip.ip_addr));
+        if let Some(flags) = ip.flags.as_ref() {
+            let flag_bits = flags
+                .iter()
+                .map(|&f| WireguardAllowedIpFlags::from(f))
+                .collect();
+            result.push(WireguardAllowedIpAttr::Flags(flag_bits));
+        }
+        result
     }
 }

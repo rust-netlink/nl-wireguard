@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use base64::{prelude::BASE64_STANDARD, Engine};
+use netlink_packet_wireguard::WireguardDeviceFlags;
 
 use crate::{
     ErrorKind, WireguardAttribute, WireguardCmd, WireguardError,
@@ -20,7 +21,38 @@ pub struct WireguardParsed {
     pub listen_port: Option<u16>,
     pub fwmark: Option<u32>,
     pub peers: Option<Vec<WireguardPeerParsed>>,
-    // TODO: Flags
+    pub flags: Option<Vec<WireguardParsedDeviceFlags>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum WireguardParsedDeviceFlags {
+    ReplacePeers,
+    Other(u32),
+}
+
+impl From<WireguardParsedDeviceFlags> for WireguardDeviceFlags {
+    fn from(flag: WireguardParsedDeviceFlags) -> Self {
+        match flag {
+            WireguardParsedDeviceFlags::ReplacePeers => {
+                WireguardDeviceFlags::ReplacePeers
+            }
+            WireguardParsedDeviceFlags::Other(bits) => {
+                WireguardDeviceFlags::from_bits_retain(bits)
+            }
+        }
+    }
+}
+
+impl From<WireguardDeviceFlags> for WireguardParsedDeviceFlags {
+    fn from(flag: WireguardDeviceFlags) -> Self {
+        match flag {
+            WireguardDeviceFlags::ReplacePeers => {
+                WireguardParsedDeviceFlags::ReplacePeers
+            }
+            _ => WireguardParsedDeviceFlags::Other(flag.bits()),
+        }
+    }
 }
 
 // For simplifying the code on hide `private_key` in Debug display of
@@ -35,6 +67,7 @@ struct _WireguardParsed<'a> {
     listen_port: &'a Option<u16>,
     fwmark: &'a Option<u32>,
     peers: &'a Option<Vec<WireguardPeerParsed>>,
+    flags: &'a Option<Vec<WireguardParsedDeviceFlags>>,
 }
 
 impl std::fmt::Debug for WireguardParsed {
@@ -50,6 +83,7 @@ impl std::fmt::Debug for WireguardParsed {
             listen_port,
             fwmark,
             peers,
+            flags,
         } = self;
 
         std::fmt::Debug::fmt(
@@ -65,6 +99,7 @@ impl std::fmt::Debug for WireguardParsed {
                 listen_port,
                 fwmark,
                 peers,
+                flags,
             },
             f,
         )
@@ -93,6 +128,14 @@ impl From<WireguardMessage> for WireguardParsed {
                             .map(WireguardPeerParsed::from)
                             .collect(),
                     );
+                }
+                WireguardAttribute::Flags(flag_bits) => {
+                    let mut flags = Vec::new();
+                    for flag_bit in flag_bits.iter() {
+                        flags.push(WireguardParsedDeviceFlags::from(flag_bit));
+                    }
+
+                    ret.flags = Some(flags);
                 }
                 _ => {
                     log::debug!("Unsupported WireguardAttribute {attr:?}");
@@ -147,6 +190,14 @@ impl WireguardParsed {
                 peer_addrs.push(peer.build()?);
             }
             attributes.push(WireguardAttribute::Peers(peer_addrs));
+        }
+
+        if let Some(flags) = self.flags.as_ref() {
+            let flag_bits = flags
+                .iter()
+                .map(|&f| WireguardDeviceFlags::from(f))
+                .collect();
+            attributes.push(WireguardAttribute::Flags(flag_bits));
         }
 
         Ok(WireguardMessage { cmd, attributes })

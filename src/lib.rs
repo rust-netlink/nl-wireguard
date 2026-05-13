@@ -42,10 +42,12 @@
 //!         WireguardIpAddress {
 //!             ip_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
 //!             prefix_length: 0,
+//!             flags: None,
 //!         },
 //!         WireguardIpAddress {
 //!             ip_addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
 //!             prefix_length: 0,
+//!             flags: None,
 //!         },
 //!     ]);
 //!
@@ -86,6 +88,9 @@ pub use self::{
     connection::new_connection_with_socket,
     error::{ErrorKind, WireguardError},
     handle::WireguardHandle,
-    parsed::WireguardParsed,
-    peer_parsed::{WireguardIpAddress, WireguardPeerParsed},
+    parsed::{WireguardParsed, WireguardParsedDeviceFlags},
+    peer_parsed::{
+        WireguardIpAddress, WireguardParsedAllowedIpFlags,
+        WireguardParsedPeerFlags, WireguardPeerParsed,
+    },
 };

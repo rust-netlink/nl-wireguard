@@ -5,7 +5,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
-use nl_wireguard::{WireguardIpAddress, WireguardParsed, WireguardPeerParsed};
+use nl_wireguard::{
+    WireguardIpAddress, WireguardParsed, WireguardParsedAllowedIpFlags,
+    WireguardParsedDeviceFlags, WireguardParsedPeerFlags, WireguardPeerParsed,
+};
 
 #[tokio::main]
 async fn main() {
@@ -28,12 +31,15 @@ async fn main() {
         WireguardIpAddress {
             ip_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             prefix_length: 0,
+            flags: None,
         },
         WireguardIpAddress {
             ip_addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             prefix_length: 0,
+            flags: Some(vec![WireguardParsedAllowedIpFlags::RemoveMe]),
         },
     ]);
+    peer_config.flags = Some(vec![WireguardParsedPeerFlags::ReplaceAllowedIps]);
 
     let mut config = WireguardParsed::default();
     config.iface_name = Some(argv[1].to_string());
@@ -44,6 +50,7 @@ async fn main() {
     config.listen_port = Some(51820);
     config.fwmark = Some(0);
     config.peers = Some(vec![peer_config]);
+    config.flags = Some(vec![WireguardParsedDeviceFlags::ReplacePeers]);
 
     let (connection, mut handle, _) = nl_wireguard::new_connection().unwrap();
     tokio::spawn(connection);
