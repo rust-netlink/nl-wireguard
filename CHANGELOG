@@ -1,4 +1,15 @@
 # Changelog
+## [0.2.0] - 2026-08-18
+### Breaking changes
+ - Use latest rust-netlink crates. (e85cafc)
+ - Do not reexport netlink-packet-wireguard. (6484172)
+
+### New features
+ - Add support flags of device, peer and allowed-ip. (691f911)
+
+### Bug fixes
+ - fix: fetch all wireguard peers. (1a41702)
+
 ## [0.1.0] - 2026-02-01
 ### Breaking changes
  - N/A
