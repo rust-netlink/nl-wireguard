@@ -11,6 +11,8 @@ pub enum ErrorKind {
     DecodeError,
     /// Invalid key, should be base64 encoded of [u8; 32]
     InvalidKey,
+    /// Invalid input from the caller, e.g. missing required property
+    InvalidInput,
 }
 
 impl std::fmt::Display for ErrorKind {
@@ -23,6 +25,7 @@ impl std::fmt::Display for ErrorKind {
                 Self::NetlinkError => "netlink_error",
                 Self::DecodeError => "decode_error",
                 Self::InvalidKey => "invalid_key",
+                Self::InvalidInput => "invalid_input",
             }
         )
     }

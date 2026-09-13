@@ -195,12 +195,19 @@ impl WireguardParsed {
     ) -> Result<WireguardMessage, WireguardError> {
         let mut attributes: Vec<WireguardAttribute> = Vec::new();
 
-        if let Some(v) = self.iface_name.as_ref() {
-            attributes.push(WireguardAttribute::IfName(v.to_string()));
-        }
-
-        if let Some(v) = self.iface_index {
-            attributes.push(WireguardAttribute::IfIndex(v));
+        // The kernel accepts one but not both of `WGDEVICE_A_IFNAME` and
+        // `WGDEVICE_A_IFINDEX`, so the interface name wins when a parsed
+        // config carries both, which is what `get_by_name()` returns.
+        if let Some(iface_name) = self.iface_name.as_ref() {
+            attributes.push(WireguardAttribute::IfName(iface_name.to_string()));
+        } else if let Some(iface_index) = self.iface_index {
+            attributes.push(WireguardAttribute::IfIndex(iface_index));
+        } else {
+            return Err(WireguardError::new(
+                ErrorKind::InvalidInput,
+                "Neither `iface_name` nor `iface_index` is defined".to_string(),
+                None,
+            ));
         }
 
         if let Some(v) = self.public_key.as_deref() {
@@ -242,6 +249,60 @@ impl WireguardParsed {
         }
 
         Ok(WireguardMessage { cmd, attributes })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn iface_attributes(msg: &WireguardMessage) -> (bool, bool) {
+        let mut has_name = false;
+        let mut has_index = false;
+        for attr in &msg.attributes {
+            match attr {
+                WireguardAttribute::IfName(_) => has_name = true,
+                WireguardAttribute::IfIndex(_) => has_index = true,
+                _ => (),
+            }
+        }
+        (has_name, has_index)
+    }
+
+    #[test]
+    fn build_uses_iface_name_when_both_are_defined() {
+        // `get_by_name()` returns both `iface_name` and `iface_index`, the
+        // kernel rejects a request carrying both.
+        let config = WireguardParsed {
+            iface_name: Some("wg0".to_string()),
+            iface_index: Some(3),
+            ..Default::default()
+        };
+
+        let msg = config.build(WireguardCmd::GetDevice).unwrap();
+
+        assert_eq!(iface_attributes(&msg), (true, false));
+    }
+
+    #[test]
+    fn build_accepts_iface_index_only() {
+        let config = WireguardParsed {
+            iface_index: Some(3),
+            ..Default::default()
+        };
+
+        let msg = config.build(WireguardCmd::GetDevice).unwrap();
+
+        assert_eq!(iface_attributes(&msg), (false, true));
+    }
+
+    #[test]
+    fn build_requires_an_interface() {
+        let err = WireguardParsed::default()
+            .build(WireguardCmd::GetDevice)
+            .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::InvalidInput);
     }
 }
 
