@@ -29,6 +29,9 @@ pub fn new_connection_with_socket<S>() -> io::Result<(
 where
     S: AsyncSocket,
 {
-    let (conn, handle, messages) = genetlink::new_connection_with_socket()?;
+    let (mut conn, handle, messages) = genetlink::new_connection_with_socket()?;
+    // The kernel reports the result of a dump in the message which ends the
+    // dump, forward it so that a failed dump is not silently truncated.
+    conn.set_forward_done(true);
     Ok((conn, WireguardHandle::new(handle), messages))
 }
