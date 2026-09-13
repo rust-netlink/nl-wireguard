@@ -232,7 +232,8 @@ impl WireguardParsed {
     /// The kernel accepts several `WG_CMD_SET_DEVICE` messages for one
     /// device where each message fills in what the prior messages missed,
     /// therefore configurations with many peers or allowed IPs are split
-    /// into messages which are within [MAX_NLA_VALUE_LEN].
+    /// into messages whose `WGDEVICE_A_PEERS` attribute fits into a single
+    /// netlink attribute.
     pub fn build_messages(
         &self,
         cmd: WireguardCmd,
