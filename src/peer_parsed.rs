@@ -16,6 +16,10 @@ use netlink_packet_wireguard::{
 use super::parsed::decode_key;
 use crate::{ErrorKind, WireguardError};
 
+/// Nanoseconds of one second, `Duration::new()` panics when its
+/// nanoseconds argument is not smaller than this.
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
 pub enum WireguardParsedPeerFlags {
@@ -157,7 +161,7 @@ impl From<WireguardPeer> for WireguardPeerParsed {
                         ret.last_handshake = None;
                     } else if v.seconds >= 0
                         && v.nano_seconds >= 0
-                        && (v.nano_seconds as u64) < (u32::MAX as u64)
+                        && v.nano_seconds < NANOS_PER_SECOND
                     {
                         ret.last_handshake = Some(Duration::new(
                             v.seconds as u64,
@@ -429,5 +433,57 @@ impl From<&WireguardIpAddress> for Vec<WireguardAllowedIpAttr> {
             result.push(WireguardAllowedIpAttr::Flags(flag_bits));
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer_with_last_handshake(
+        seconds: i64,
+        nano_seconds: i64,
+    ) -> WireguardPeer {
+        WireguardPeer(vec![
+            WireguardPeerAttribute::PublicKey([1u8; 32]),
+            WireguardPeerAttribute::LastHandshake(WireguardTimeSpec {
+                seconds,
+                nano_seconds,
+            }),
+        ])
+    }
+
+    #[test]
+    fn last_handshake_is_parsed() {
+        let peer = WireguardPeerParsed::from(peer_with_last_handshake(
+            1_700_000_000,
+            123_456_789,
+        ));
+
+        assert_eq!(
+            peer.last_handshake,
+            Some(Duration::new(1_700_000_000, 123_456_789))
+        );
+    }
+
+    #[test]
+    fn invalid_last_handshake_is_ignored() {
+        // `Duration::new()` panics when the nanoseconds are not smaller
+        // than one second.
+        for nano_seconds in [1_000_000_000i64, 1_500_000_000, 4_000_000_000] {
+            let peer = WireguardPeerParsed::from(peer_with_last_handshake(
+                1,
+                nano_seconds,
+            ));
+            assert_eq!(peer.last_handshake, None);
+        }
+
+        for (seconds, nano_seconds) in [(-1i64, 0i64), (1, -1)] {
+            let peer = WireguardPeerParsed::from(peer_with_last_handshake(
+                seconds,
+                nano_seconds,
+            ));
+            assert_eq!(peer.last_handshake, None);
+        }
     }
 }
