@@ -21,8 +21,12 @@ use nl_wireguard::{
     WireguardHandle, WireguardIpAddress, WireguardParsed, WireguardPeerParsed,
 };
 
-/// Interface used by the integration tests.
+/// Interface used by `get_by_name_result_can_be_applied_again()`.
 const IFACE_NAME: &str = "nlwgtest0";
+
+/// Interface used by `set_configuration_larger_than_a_single_message()`.
+/// Every test uses its own interface so that they can run in parallel.
+const LARGE_IFACE_NAME: &str = "nlwgtest1";
 
 /// Base64 encoded public key of a throwaway peer.
 const PEER_PUBLIC_KEY: &str = "8bdQrVLqiw3ZoHCucNh1YfH0iCWuyStniRr8t7H24Fk=";
@@ -31,24 +35,20 @@ const PEER_PUBLIC_KEY: &str = "8bdQrVLqiw3ZoHCucNh1YfH0iCWuyStniRr8t7H24Fk=";
 const DEVICE_PRIVATE_KEY: &str = "6LTHiAM4vgKEgi5vm30f/EBIEWFDmySkTc9EWCcIqEs=";
 
 /// Test wireguard interface which is removed on drop.
-struct TestIface;
+struct TestIface(&'static str);
 
 impl TestIface {
-    fn create() -> Self {
-        let _ = Command::new("ip")
-            .args(["link", "del", IFACE_NAME])
-            .status();
-        run("ip", &["link", "add", IFACE_NAME, "type", "wireguard"]);
-        run("ip", &["link", "set", IFACE_NAME, "up"]);
-        Self
+    fn create(name: &'static str) -> Self {
+        let _ = Command::new("ip").args(["link", "del", name]).status();
+        run("ip", &["link", "add", name, "type", "wireguard"]);
+        run("ip", &["link", "set", name, "up"]);
+        Self(name)
     }
 }
 
 impl Drop for TestIface {
     fn drop(&mut self) {
-        let _ = Command::new("ip")
-            .args(["link", "del", IFACE_NAME])
-            .status();
+        let _ = Command::new("ip").args(["link", "del", self.0]).status();
     }
 }
 
@@ -67,10 +67,69 @@ async fn connect() -> WireguardHandle {
     handle
 }
 
+fn peer_with_allowed_ips(count: u32) -> WireguardPeerParsed {
+    let mut peer = WireguardPeerParsed::default();
+    peer.public_key = Some(PEER_PUBLIC_KEY.to_string());
+    peer.allowed_ips = Some(
+        (0..count)
+            .map(|i| WireguardIpAddress {
+                ip_addr: IpAddr::V4(Ipv4Addr::new(
+                    10,
+                    213,
+                    (i / 256) as u8,
+                    (i % 256) as u8,
+                )),
+                prefix_length: 32,
+                flags: None,
+            })
+            .collect(),
+    );
+    peer
+}
+
+fn allowed_ip_count(config: &WireguardParsed) -> usize {
+    config
+        .peers
+        .iter()
+        .flatten()
+        .map(|peer| peer.allowed_ips.iter().flatten().count())
+        .sum()
+}
+
+fn large_config() -> WireguardParsed {
+    let mut config = WireguardParsed::default();
+    config.iface_name = Some(LARGE_IFACE_NAME.to_string());
+    config.private_key = Some(DEVICE_PRIVATE_KEY.to_string());
+    config.flags =
+        Some(vec![nl_wireguard::WireguardParsedDeviceFlags::ReplacePeers]);
+    config.peers = Some(vec![peer_with_allowed_ips(5_000)]);
+    config
+}
+
+#[tokio::test]
+#[ignore = "needs root and the wireguard kernel module"]
+async fn set_configuration_larger_than_a_single_message() {
+    let _iface = TestIface::create(LARGE_IFACE_NAME);
+    let mut handle = connect().await;
+
+    // Applying this configuration used to panic inside the netlink encoder
+    // because one netlink attribute can not exceed 64 KiB.
+    handle
+        .set(large_config())
+        .await
+        .expect("failed to apply config");
+
+    let parsed = handle
+        .get_by_name(LARGE_IFACE_NAME)
+        .await
+        .expect("failed to get config");
+    assert_eq!(allowed_ip_count(&parsed), 5_000);
+}
+
 #[tokio::test]
 #[ignore = "needs root and the wireguard kernel module"]
 async fn get_by_name_result_can_be_applied_again() {
-    let _iface = TestIface::create();
+    let _iface = TestIface::create(IFACE_NAME);
     let mut handle = connect().await;
 
     let mut peer = WireguardPeerParsed::default();

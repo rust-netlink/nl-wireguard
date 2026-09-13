@@ -56,17 +56,38 @@ impl WireguardHandle {
         &mut self,
         parsed: WireguardParsed,
     ) -> Result<(), WireguardError> {
-        let msg = parsed.build(WireguardCmd::SetDevice)?;
-        //TODO: Polished this
-        match self
-            .request(NLM_F_REQUEST | NLM_F_ACK, msg.clone())
-            .await?
-            .next()
-            .await
-        {
-            None | Some(Ok(_)) => Ok(()),
-            Some(Err(e)) => Err(e),
+        // The kernel limits the length of one netlink attribute to 64 KiB,
+        // therefore a large configuration is applied by several messages,
+        // each one filling in what the prior messages missed.
+        let messages = parsed.build_messages(WireguardCmd::SetDevice)?;
+        let total = messages.len();
+
+        for (index, msg) in messages.into_iter().enumerate() {
+            let mut stream =
+                self.request(NLM_F_REQUEST | NLM_F_ACK, msg).await?;
+            while let Some(reply) = stream.next().await {
+                if let Err(e) = reply {
+                    let WireguardError {
+                        kind,
+                        msg,
+                        netlink_msg,
+                    } = e;
+                    let msg = if total > 1 {
+                        format!(
+                            "Failed to apply part {}/{} of the configuration: \
+                             {msg}",
+                            index + 1,
+                            total
+                        )
+                    } else {
+                        msg
+                    };
+                    return Err(WireguardError::new(kind, msg, netlink_msg));
+                }
+            }
         }
+
+        Ok(())
     }
 
     /// Sending arbitrary [WireguardMessage] message and manually handle
