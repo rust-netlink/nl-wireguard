@@ -4,7 +4,12 @@ use netlink_packet_core::NetlinkMessage;
 use netlink_packet_generic::GenlMessage;
 use netlink_packet_wireguard::WireguardMessage;
 
+/// Kind of a [WireguardError].
+///
+/// This enum is `#[non_exhaustive]`, a `match` on it needs a wildcard arm.
+/// Otherwise every new error kind would break the code of every user.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
+#[non_exhaustive]
 pub enum ErrorKind {
     Bug,
     NetlinkError,
