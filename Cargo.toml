@@ -6,11 +6,9 @@ license = "MIT"
 edition = "2021"
 description = "Linux netlink library for wireguard management"
 documentation = "https://docs.rs/nl-wireguard"
-homepage = "https://github.com/rust-netlink/nl-wireguard"
 repository = "https://github.com/rust-netlink/nl-wireguard"
 keywords = ["network"]
 categories = ["network-programming", "os"]
-readme = "README.md"
 
 [lib]
 name = "nl_wireguard"
