@@ -253,6 +253,16 @@ impl WireguardPeerParsed {
 
     pub fn build(&self) -> Result<WireguardPeer, WireguardError> {
         let mut attrs: Vec<WireguardPeerAttribute> = Vec::new();
+
+        if self.public_key.is_none() {
+            return Err(WireguardError::new(
+                ErrorKind::InvalidInput,
+                "Peer is missing `public_key` which the kernel requires"
+                    .to_string(),
+                None,
+            ));
+        }
+
         if let Some(v) = self.endpoint {
             attrs.push(WireguardPeerAttribute::Endpoint(v));
         }
@@ -293,6 +303,9 @@ impl WireguardPeerParsed {
         }
 
         if let Some(ips) = self.allowed_ips.as_ref() {
+            for ip in ips {
+                ip.validate()?;
+            }
             attrs.push(WireguardPeerAttribute::AllowedIps(
                 ips.iter()
                     .map(|ip| {
@@ -354,6 +367,26 @@ pub struct WireguardIpAddress {
     pub prefix_length: u8,
     pub ip_addr: IpAddr,
     pub flags: Option<Vec<WireguardParsedAllowedIpFlags>>,
+}
+
+impl WireguardIpAddress {
+    /// Check that the prefix length matches the address family, the kernel
+    /// rejects larger values with `-EINVAL`.
+    fn validate(&self) -> Result<(), WireguardError> {
+        let max_prefix_length = if self.ip_addr.is_ipv4() { 32 } else { 128 };
+        if self.prefix_length > max_prefix_length {
+            return Err(WireguardError::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "`prefix_length` {} is too large for {}, expecting at \
+                     most {}",
+                    self.prefix_length, self.ip_addr, max_prefix_length
+                ),
+                None,
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl TryFrom<&WireguardAllowedIp> for WireguardIpAddress {
@@ -438,7 +471,12 @@ impl From<&WireguardIpAddress> for Vec<WireguardAllowedIpAttr> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     use super::*;
+
+    const PEER_PUBLIC_KEY: &str =
+        "8bdQrVLqiw3ZoHCucNh1YfH0iCWuyStniRr8t7H24Fk=";
 
     fn peer_with_last_handshake(
         seconds: i64,
@@ -484,6 +522,48 @@ mod tests {
                 nano_seconds,
             ));
             assert_eq!(peer.last_handshake, None);
+        }
+    }
+
+    fn peer_with_allowed_ip(
+        ip_addr: IpAddr,
+        prefix_length: u8,
+    ) -> WireguardPeerParsed {
+        WireguardPeerParsed {
+            public_key: Some(PEER_PUBLIC_KEY.to_string()),
+            allowed_ips: Some(vec![WireguardIpAddress {
+                ip_addr,
+                prefix_length,
+                flags: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn peer_without_public_key_is_rejected() {
+        let err = WireguardPeerParsed::default().build().unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn out_of_range_prefix_length_is_rejected() {
+        for (ip_addr, prefix_length, expected) in [
+            (IpAddr::V4(Ipv4Addr::new(10, 213, 0, 0)), 32u8, true),
+            (IpAddr::V4(Ipv4Addr::new(10, 213, 0, 0)), 33, false),
+            (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 128, true),
+            (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 129, false),
+        ] {
+            let result = peer_with_allowed_ip(ip_addr, prefix_length).build();
+            assert_eq!(
+                result.is_ok(),
+                expected,
+                "{ip_addr}/{prefix_length}: {result:?}"
+            );
+            if let Err(err) = result {
+                assert_eq!(err.kind, ErrorKind::InvalidInput);
+            }
         }
     }
 }
