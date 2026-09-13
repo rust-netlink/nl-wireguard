@@ -1,35 +1,19 @@
 // SPDX-License-Identifier: MIT
 
-//! Replace key material of netlink messages with zeros.
+//! Remove key material from the messages attached to errors.
 //!
 //! The kernel echoes the request of a rejected netlink message back in its
 //! error reply and only zeros the keys of requests which reached its own
 //! handler, e.g. a request rejected due to missing `CAP_NET_ADMIN` still
-//! contains the keys it was sent with. Therefore every message attached to
-//! a [crate::WireguardError] is redacted.
+//! holds the keys it was sent with. Therefore the keys of a structured
+//! message are zeroed and the raw copy of a request is dropped, the crate
+//! attaches the request itself to the error instead.
 
 use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
 use netlink_packet_generic::GenlMessage;
 use netlink_packet_wireguard::{
     WireguardAttribute, WireguardMessage, WireguardPeerAttribute,
 };
-
-/// `WGDEVICE_A_PRIVATE_KEY`
-const WGDEVICE_A_PRIVATE_KEY: u16 = 3;
-/// `WGDEVICE_A_PEERS`
-const WGDEVICE_A_PEERS: u16 = 8;
-/// `WGPEER_A_PRESHARED_KEY`
-const WGPEER_A_PRESHARED_KEY: u16 = 2;
-
-/// `struct nlmsghdr` size
-const NLMSG_HDR_LEN: usize = 16;
-/// `struct genlmsghdr` size
-const GENL_HDR_LEN: usize = 4;
-/// `struct nlattr` header size
-const NLA_HDR_LEN: usize = 4;
-const NLA_ALIGNTO: usize = 4;
-/// `NLA_TYPE_MASK`
-const NLA_TYPE_MASK: u16 = 0x3fff;
 
 /// Replace all key material of `msg` with zeros.
 pub(crate) fn redact_message(
@@ -39,7 +23,10 @@ pub(crate) fn redact_message(
         NetlinkPayload::InnerMessage(genl_msg) => {
             redact_attributes(&mut genl_msg.payload.attributes)
         }
-        NetlinkPayload::Error(err_msg) => redact_raw(&mut err_msg.header),
+        // Raw bytes of a request can not be redacted reliably, drop them
+        // instead of risking that a key ends up in a log.
+        NetlinkPayload::Error(err_msg) => err_msg.header.clear(),
+        NetlinkPayload::Overrun(bytes) => bytes.clear(),
         _ => (),
     }
 }
@@ -64,53 +51,74 @@ fn redact_attributes(attributes: &mut [WireguardAttribute]) {
     }
 }
 
-/// Zero the keys of a raw netlink message which the kernel echoed back.
-///
-/// The message is a netlink header, a generic netlink header and the
-/// `WGDEVICE_A_*` attributes, the `WGPEER_A_*` attributes of every peer are
-/// nested in `WGDEVICE_A_PEERS`.
-fn redact_raw(buffer: &mut [u8]) {
-    let start = NLMSG_HDR_LEN + GENL_HDR_LEN;
-    if buffer.len() < start {
-        return;
+#[cfg(test)]
+mod tests {
+    use netlink_packet_core::{ErrorMessage, NetlinkHeader};
+    use netlink_packet_wireguard::{
+        WireguardCmd, WireguardPeer, WireguardPeerAttribute,
+    };
+
+    use super::*;
+
+    fn request() -> WireguardMessage {
+        WireguardMessage {
+            cmd: WireguardCmd::SetDevice,
+            attributes: vec![
+                WireguardAttribute::IfName("wg0".to_string()),
+                WireguardAttribute::PrivateKey([0x7b; 32]),
+                WireguardAttribute::Peers(vec![WireguardPeer(vec![
+                    WireguardPeerAttribute::PublicKey([0x11; 32]),
+                    WireguardPeerAttribute::PresharedKey([0x5a; 32]),
+                ])]),
+            ],
+        }
     }
-    for_each_attribute(&mut buffer[start..], &mut |kind, value| {
-        if kind == WGDEVICE_A_PRIVATE_KEY {
-            value.fill(0);
-        } else if kind == WGDEVICE_A_PEERS {
-            redact_peers(value);
-        }
-    });
-}
 
-/// Zero the preshared key of every peer nested in `buffer`.
-fn redact_peers(buffer: &mut [u8]) {
-    // Every peer is a nested attribute of its own.
-    for_each_attribute(buffer, &mut |_, peer| {
-        for_each_attribute(peer, &mut |kind, value| {
-            if kind == WGPEER_A_PRESHARED_KEY {
-                value.fill(0);
+    #[test]
+    fn keys_of_a_request_are_zeroed() {
+        let request = request();
+        let mut msg = NetlinkMessage::from(GenlMessage::from_payload(request));
+
+        redact_message(&mut msg);
+
+        let NetlinkPayload::InnerMessage(genl_msg) = &msg.payload else {
+            panic!("unexpected payload {:?}", msg.payload);
+        };
+        for attribute in &genl_msg.payload.attributes {
+            match attribute {
+                WireguardAttribute::PrivateKey(key) => {
+                    assert_eq!(*key, [0u8; 32])
+                }
+                WireguardAttribute::Peers(peers) => {
+                    for peer in peers {
+                        for attribute in &peer.0 {
+                            if let WireguardPeerAttribute::PresharedKey(key) =
+                                attribute
+                            {
+                                assert_eq!(*key, [0u8; 32]);
+                            }
+                        }
+                    }
+                }
+                _ => (),
             }
-        });
-    });
-}
-
-/// Call `visit` with the kind, without `NLA_F_NESTED`, and with the value
-/// of every attribute in `buffer`.
-fn for_each_attribute<F>(buffer: &mut [u8], visit: &mut F)
-where
-    F: FnMut(u16, &mut [u8]),
-{
-    let mut offset = 0;
-    while offset + NLA_HDR_LEN <= buffer.len() {
-        let len =
-            u16::from_ne_bytes([buffer[offset], buffer[offset + 1]]) as usize;
-        if len < NLA_HDR_LEN || offset + len > buffer.len() {
-            return;
         }
-        let kind = u16::from_ne_bytes([buffer[offset + 2], buffer[offset + 3]])
-            & NLA_TYPE_MASK;
-        visit(kind, &mut buffer[offset + NLA_HDR_LEN..offset + len]);
-        offset += (len + NLA_ALIGNTO - 1) & !(NLA_ALIGNTO - 1);
+    }
+
+    #[test]
+    fn echoed_request_is_dropped() {
+        let mut error_message = ErrorMessage::default();
+        error_message.header = vec![0x7b; 64];
+        let mut msg = NetlinkMessage::new(
+            NetlinkHeader::default(),
+            NetlinkPayload::Error(error_message),
+        );
+
+        redact_message(&mut msg);
+
+        let NetlinkPayload::Error(error_message) = &msg.payload else {
+            panic!("unexpected payload {:?}", msg.payload);
+        };
+        assert!(error_message.header.is_empty());
     }
 }

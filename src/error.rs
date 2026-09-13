@@ -106,12 +106,6 @@ mod tests {
         }
     }
 
-    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
-    }
-
     /// Assert that all keys of `attributes` are zeroed and report whether
     /// a private and a preshared key was found.
     fn assert_redacted(attributes: &[WireguardAttribute]) -> (bool, bool) {
@@ -159,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_redacted_from_echoed_requests() {
+    fn echoed_requests_are_dropped() {
         // The kernel echoes the raw request in its error reply.
         let message = request_message();
         let mut raw = vec![0u8; 16 + 4 + message.buffer_len()];
@@ -185,10 +179,9 @@ mod tests {
         let NetlinkPayload::Error(error_message) = &stored.payload else {
             panic!("unexpected payload {:?}", stored.payload);
         };
-        assert!(!contains(&error_message.header, &PRIVATE_KEY));
-        assert!(!contains(&error_message.header, &PRESHARED_KEY));
-        // Public keys are no secrets and are kept for diagnostics.
-        assert!(contains(&error_message.header, &PUBLIC_KEY));
+        // The raw copy of the request is dropped instead of being redacted
+        // in place, a key can not be missed that way.
+        assert!(error_message.header.is_empty());
         assert!(!format!("{err:?}").contains(&hex(&PRIVATE_KEY)));
         assert!(!format!("{err:?}").contains(&hex(&PRESHARED_KEY)));
     }

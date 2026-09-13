@@ -147,14 +147,14 @@ fn parse_nl_msg_stream(
                     // An acknowledgement holds no error code and completes
                     // the request.
                     NetlinkPayload::Error(err) if err.code.is_none() => None,
+                    // The payload of an error is a copy of the request,
+                    // attach the request itself instead: it holds the same
+                    // information and its keys are redacted reliably.
                     NetlinkPayload::Error(err) => {
                         Some(Err(WireguardError::new(
                             ErrorKind::NetlinkError,
                             netlink_error_message(&err),
-                            Some(NetlinkMessage::new(
-                                header,
-                                NetlinkPayload::Error(err),
-                            )),
+                            Some((*nl_msg).clone()),
                         )))
                     }
                     // A dump reports its error code in the message which
@@ -169,14 +169,21 @@ fn parse_nl_msg_stream(
                                     "Netlink dump failed: {}",
                                     io::Error::from_raw_os_error(-done.code)
                                 ),
-                                Some(NetlinkMessage::new(
-                                    header,
-                                    NetlinkPayload::Done(done),
-                                )),
+                                Some((*nl_msg).clone()),
                             )))
                         }
                     }
                     NetlinkPayload::Noop => None,
+                    // An overrun message holds raw bytes of a message which
+                    // could not be read, attach the request instead.
+                    NetlinkPayload::Overrun(_) => {
+                        Some(Err(WireguardError::new(
+                            ErrorKind::Bug,
+                            "Netlink message overrun, messages were lost"
+                                .to_string(),
+                            Some((*nl_msg).clone()),
+                        )))
+                    }
                     payload => Some(Err(WireguardError::new(
                         ErrorKind::Bug,
                         format!(
@@ -228,11 +235,20 @@ mod tests {
     use std::num::NonZeroI32;
 
     use futures_util::stream;
-    use netlink_packet_core::{DoneMessage, ErrorMessage, NetlinkHeader};
+    use netlink_packet_core::{
+        DoneMessage, Emitable, ErrorMessage, NetlinkHeader,
+    };
+    use netlink_packet_wireguard::{
+        WireguardAttribute, WireguardPeer, WireguardPeerAttribute,
+    };
 
     use super::*;
 
     type NetlinkMsg = NetlinkMessage<GenlMessage<WireguardMessage>>;
+
+    const PUBLIC_KEY: [u8; 32] = [0x11; 32];
+    const PRIVATE_KEY: [u8; 32] = [0x7b; 32];
+    const PRESHARED_KEY: [u8; 32] = [0x5a; 32];
 
     fn inner_message() -> NetlinkMsg {
         NetlinkMessage::from(GenlMessage::from_payload(WireguardMessage {
@@ -266,15 +282,44 @@ mod tests {
         )
     }
 
-    async fn parse_replies(
+    async fn parse_replies_with(
+        request: NetlinkMsg,
         replies: Vec<NetlinkMsg>,
     ) -> Vec<Result<WireguardMessage, WireguardError>> {
         let replies: Vec<Result<NetlinkMsg, DecodeError>> =
             replies.into_iter().map(Ok).collect();
-        let request = inner_message();
         parse_nl_msg_stream(request, stream::iter(replies))
             .collect()
             .await
+    }
+
+    async fn parse_replies(
+        replies: Vec<NetlinkMsg>,
+    ) -> Vec<Result<WireguardMessage, WireguardError>> {
+        parse_replies_with(inner_message(), replies).await
+    }
+
+    fn request_message() -> WireguardMessage {
+        WireguardMessage {
+            cmd: WireguardCmd::SetDevice,
+            attributes: vec![
+                WireguardAttribute::IfName("wg0".to_string()),
+                WireguardAttribute::PrivateKey(PRIVATE_KEY),
+                WireguardAttribute::Peers(vec![WireguardPeer(vec![
+                    WireguardPeerAttribute::PublicKey(PUBLIC_KEY),
+                    WireguardPeerAttribute::PresharedKey(PRESHARED_KEY),
+                ])]),
+            ],
+        }
+    }
+
+    /// Render bytes the way `Debug` renders a `[u8; 32]` or a `Vec<u8>`.
+    fn byte_list(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .map(|byte| byte.to_string())
+            .collect::<Vec<String>>()
+            .join(", ")
     }
 
     #[tokio::test]
@@ -326,5 +371,74 @@ mod tests {
         assert_eq!(replies.len(), 1);
         let err = replies[0].as_ref().expect_err("expected an error");
         assert_eq!(err.kind, ErrorKind::Bug);
+    }
+
+    #[tokio::test]
+    async fn error_does_not_report_keys() {
+        let request = request_message();
+        // The kernel echoes the raw request in its error reply.
+        let mut echoed = vec![0u8; 16 + 4 + request.buffer_len()];
+        // `cmd` and `version` of the generic netlink header.
+        echoed[16] = 1;
+        echoed[17] = 1;
+        request.emit(&mut echoed[20..]);
+
+        let mut error_message = ErrorMessage::default();
+        error_message.code = NonZeroI32::new(-13);
+        error_message.header = echoed;
+        let replies = parse_replies_with(
+            NetlinkMessage::from(GenlMessage::from_payload(request)),
+            vec![NetlinkMessage::new(
+                NetlinkHeader::default(),
+                NetlinkPayload::Error(error_message),
+            )],
+        )
+        .await;
+
+        let err = replies[0].as_ref().expect_err("expected an error");
+        // The errno is reported without rendering the echoed request.
+        assert!(
+            err.msg.contains("Permission denied"),
+            "unexpected error message: {}",
+            err.msg
+        );
+        let report = format!("{err:?}");
+        assert!(!report.contains(&byte_list(&PRIVATE_KEY)));
+        assert!(!report.contains(&byte_list(&PRESHARED_KEY)));
+
+        // The attached request keeps the peer public key and holds no key.
+        let stored = err.netlink_msg.as_ref().expect("no netlink message");
+        let NetlinkPayload::InnerMessage(genl_msg) = &stored.payload else {
+            panic!("unexpected payload {:?}", stored.payload);
+        };
+        let mut private_key_redacted = false;
+        let mut preshared_key_redacted = false;
+        for attribute in &genl_msg.payload.attributes {
+            match attribute {
+                WireguardAttribute::PrivateKey(key) => {
+                    assert_eq!(*key, [0u8; 32]);
+                    private_key_redacted = true;
+                }
+                WireguardAttribute::Peers(peers) => {
+                    for peer in peers {
+                        for attribute in &peer.0 {
+                            match attribute {
+                                WireguardPeerAttribute::PublicKey(key) => {
+                                    assert_eq!(*key, PUBLIC_KEY);
+                                }
+                                WireguardPeerAttribute::PresharedKey(key) => {
+                                    assert_eq!(*key, [0u8; 32]);
+                                    preshared_key_redacted = true;
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+        assert!(private_key_redacted);
+        assert!(preshared_key_redacted);
     }
 }
