@@ -25,7 +25,8 @@
 //! use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 //!
 //! use nl_wireguard::{
-//!     WireguardIpAddress, WireguardParsed, WireguardPeerParsed
+//!     WireguardIpAddress, WireguardParsed, WireguardParsedDeviceFlags,
+//!     WireguardParsedPeerFlags, WireguardPeerParsed,
 //! };
 //!
 //! async fn set_wireguard_config(
@@ -50,6 +51,8 @@
 //!             flags: None,
 //!         },
 //!     ]);
+//!     peer_config.flags =
+//!         Some(vec![WireguardParsedPeerFlags::ReplaceAllowedIps]);
 //!
 //!     let mut config = WireguardParsed::default();
 //!     config.iface_name = Some(iface_name.to_string());
@@ -60,6 +63,7 @@
 //!     config.listen_port = Some(51820);
 //!     config.fwmark = Some(0);
 //!     config.peers = Some(vec![peer_config]);
+//!     config.flags = Some(vec![WireguardParsedDeviceFlags::ReplacePeers]);
 //!
 //!     let (conn, mut handle, _) = nl_wireguard::new_connection()?;
 //!     tokio::spawn(conn);
@@ -67,6 +71,10 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! `WireguardParsedDeviceFlags::ReplacePeers` and
+//! `WireguardParsedPeerFlags::ReplaceAllowedIps` make repeated runs of the
+//! example replace the existing configuration instead of appending to it.
 
 mod connection;
 mod error;
@@ -87,3 +95,8 @@ pub use self::{
         WireguardParsedPeerFlags, WireguardPeerParsed,
     },
 };
+
+// Compile the examples of the README as doc tests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
