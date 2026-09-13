@@ -167,10 +167,11 @@ impl From<Vec<WireguardMessage>> for WireguardParsed {
                         ret.listen_port = Some(v)
                     }
                     WireguardAttribute::Fwmark(v) => ret.fwmark = Some(v),
-                    WireguardAttribute::Peers(peers) => {
-                        ret.peers.get_or_insert_with(Vec::new).extend(
-                            peers.into_iter().map(WireguardPeerParsed::from),
-                        );
+                    WireguardAttribute::Peers(peer_attributes) => {
+                        let peers = ret.peers.get_or_insert_with(Vec::new);
+                        for peer in peer_attributes {
+                            push_peer(peers, WireguardPeerParsed::from(peer));
+                        }
                     }
                     WireguardAttribute::Flags(flag_bits) => {
                         ret.flags.get_or_insert_with(Vec::new).extend(
@@ -446,6 +447,18 @@ fn take_allowed_ips_batch(
     ips.drain(..count).collect()
 }
 
+/// Append `peer` to `peers`, merging it with the previous entry when the
+/// kernel split one peer over several messages.
+fn push_peer(peers: &mut Vec<WireguardPeerParsed>, peer: WireguardPeerParsed) {
+    if let Some(last) = peers.last_mut() {
+        if peer.public_key.is_some() && last.public_key == peer.public_key {
+            last.merge_continuation(peer);
+            return;
+        }
+    }
+    peers.push(peer);
+}
+
 pub(crate) fn decode_key(
     prop_name: &str,
     key_str: &str,
@@ -483,6 +496,9 @@ mod tests {
 
     use genetlink::message::RawGenlMessage;
     use netlink_packet_generic::GenlMessage;
+    use netlink_packet_wireguard::{
+        WireguardAddressFamily, WireguardAllowedIpAttr,
+    };
 
     use super::*;
     use crate::{WireguardIpAddress, WireguardParsedPeerFlags};
@@ -679,5 +695,90 @@ mod tests {
         let err = large_config().build(WireguardCmd::SetDevice).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::InvalidInput);
+    }
+
+    fn allowed_ip(ip: &str) -> WireguardAllowedIp {
+        let ip: IpAddr = ip.parse().expect("invalid IP address");
+        let family = if ip.is_ipv4() {
+            WireguardAddressFamily::Ipv4
+        } else {
+            WireguardAddressFamily::Ipv6
+        };
+        WireguardAllowedIp(vec![
+            WireguardAllowedIpAttr::Cidr(32),
+            WireguardAllowedIpAttr::Family(family),
+            WireguardAllowedIpAttr::IpAddr(ip),
+        ])
+    }
+
+    fn reply_with_peer(peer: WireguardPeer) -> WireguardMessage {
+        WireguardMessage {
+            cmd: WireguardCmd::GetDevice,
+            attributes: vec![WireguardAttribute::Peers(vec![peer])],
+        }
+    }
+
+    #[test]
+    fn get_device_replies_are_coalesced() {
+        // The kernel repeats a peer which does not fit into a single
+        // message with only its public key and the remaining allowed IPs.
+        let first_reply = WireguardMessage {
+            cmd: WireguardCmd::GetDevice,
+            attributes: vec![
+                WireguardAttribute::IfName("wg0".to_string()),
+                WireguardAttribute::IfIndex(3),
+                WireguardAttribute::Peers(vec![WireguardPeer(vec![
+                    WireguardPeerAttribute::PublicKey([1u8; 32]),
+                    WireguardPeerAttribute::PersistentKeepalive(25),
+                    WireguardPeerAttribute::RxBytes(1024),
+                    WireguardPeerAttribute::AllowedIps(vec![
+                        allowed_ip("10.213.0.1"),
+                        allowed_ip("10.213.0.2"),
+                    ]),
+                ])]),
+            ],
+        };
+        let continuation = reply_with_peer(WireguardPeer(vec![
+            WireguardPeerAttribute::PublicKey([1u8; 32]),
+            WireguardPeerAttribute::AllowedIps(vec![allowed_ip("10.213.0.3")]),
+        ]));
+        let last_continuation = reply_with_peer(WireguardPeer(vec![
+            WireguardPeerAttribute::PublicKey([1u8; 32]),
+            WireguardPeerAttribute::AllowedIps(vec![allowed_ip("10.213.0.4")]),
+        ]));
+
+        let parsed = WireguardParsed::from(vec![
+            first_reply,
+            continuation,
+            last_continuation,
+        ]);
+
+        assert_eq!(parsed.iface_name.as_deref(), Some("wg0"));
+        assert_eq!(parsed.iface_index, Some(3));
+        let peers = parsed.peers.expect("no peer parsed");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].allowed_ips.as_ref().map(Vec::len), Some(4));
+        assert_eq!(peers[0].persistent_keepalive, Some(25));
+        assert_eq!(peers[0].rx_bytes, Some(1024));
+    }
+
+    #[test]
+    fn peers_with_different_public_keys_are_not_coalesced() {
+        let parsed = WireguardParsed::from(vec![
+            reply_with_peer(WireguardPeer(vec![
+                WireguardPeerAttribute::PublicKey([1u8; 32]),
+                WireguardPeerAttribute::AllowedIps(vec![allowed_ip(
+                    "10.213.0.1",
+                )]),
+            ])),
+            reply_with_peer(WireguardPeer(vec![
+                WireguardPeerAttribute::PublicKey([2u8; 32]),
+                WireguardPeerAttribute::AllowedIps(vec![allowed_ip(
+                    "10.213.0.2",
+                )]),
+            ])),
+        ]);
+
+        assert_eq!(parsed.peers.expect("no peer parsed").len(), 2);
     }
 }

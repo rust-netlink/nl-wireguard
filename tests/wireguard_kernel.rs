@@ -123,6 +123,9 @@ async fn set_configuration_larger_than_a_single_message() {
         .get_by_name(LARGE_IFACE_NAME)
         .await
         .expect("failed to get config");
+    // The kernel split the peer over several messages, they have to be
+    // coalesced into one peer.
+    assert_eq!(parsed.peers.as_ref().map(Vec::len), Some(1));
     assert_eq!(allowed_ip_count(&parsed), 5_000);
 }
 

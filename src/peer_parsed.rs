@@ -205,6 +205,48 @@ impl From<WireguardPeer> for WireguardPeerParsed {
 }
 
 impl WireguardPeerParsed {
+    /// Merge a continuation of this peer which the kernel sent in a
+    /// following message.
+    ///
+    /// A peer which does not fit into a single message is repeated with
+    /// only `WGPEER_A_PUBLIC_KEY` and the remaining `WGPEER_A_ALLOWEDIPS`,
+    /// so adjacent peers with the same public key have to be coalesced.
+    pub(crate) fn merge_continuation(&mut self, continuation: Self) {
+        if let Some(more) = continuation.allowed_ips {
+            match self.allowed_ips.as_mut() {
+                Some(allowed_ips) => allowed_ips.extend(more),
+                None => self.allowed_ips = Some(more),
+            }
+        }
+        if self.public_key.is_none() {
+            self.public_key = continuation.public_key;
+        }
+        if self.preshared_key.is_none() {
+            self.preshared_key = continuation.preshared_key;
+        }
+        if self.endpoint.is_none() {
+            self.endpoint = continuation.endpoint;
+        }
+        if self.persistent_keepalive.is_none() {
+            self.persistent_keepalive = continuation.persistent_keepalive;
+        }
+        if self.last_handshake.is_none() {
+            self.last_handshake = continuation.last_handshake;
+        }
+        if self.rx_bytes.is_none() {
+            self.rx_bytes = continuation.rx_bytes;
+        }
+        if self.tx_bytes.is_none() {
+            self.tx_bytes = continuation.tx_bytes;
+        }
+        if self.protocol_version.is_none() {
+            self.protocol_version = continuation.protocol_version;
+        }
+        if let Some(flags) = continuation.flags {
+            self.flags.get_or_insert_with(Vec::new).extend(flags);
+        }
+    }
+
     pub fn build(&self) -> Result<WireguardPeer, WireguardError> {
         let mut attrs: Vec<WireguardPeerAttribute> = Vec::new();
         if let Some(v) = self.endpoint {
