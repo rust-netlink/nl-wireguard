@@ -467,8 +467,7 @@ pub(crate) fn decode_key(
         WireguardError::new(
             ErrorKind::InvalidKey,
             format!(
-                "Invalid {prop_name}: not valid base64 encoded string \
-                 {key_str}: {e}"
+                "Invalid {prop_name}: not a valid base64 encoded string: {e}"
             ),
             None,
         )
@@ -477,10 +476,10 @@ pub(crate) fn decode_key(
         return Err(WireguardError::new(
             ErrorKind::InvalidKey,
             format!(
-                "Invalid {prop_name}: current length {}, but expecting {} \
-                 length of u8 encoded base64 string, {key_str}",
-                key.len(),
-                WireguardAttribute::WG_KEY_LEN
+                "Invalid {prop_name}: {} bytes expected, but the base64 \
+                 encoded string holds {} bytes",
+                WireguardAttribute::WG_KEY_LEN,
+                key.len()
             ),
             None,
         ));
@@ -780,5 +779,21 @@ mod tests {
         ]);
 
         assert_eq!(parsed.peers.expect("no peer parsed").len(), 2);
+    }
+
+    #[test]
+    fn invalid_key_is_not_reported_in_the_error() {
+        // 31 bytes instead of 32.
+        let key = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ==";
+        let err = decode_key("private_key", key).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidKey);
+        assert!(!err.msg.contains(key));
+        assert!(!format!("{err:?}").contains(key));
+
+        let key = "not base64!";
+        let err = decode_key("peer.preshared_key", key).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidKey);
+        assert!(!err.msg.contains(key));
+        assert!(!format!("{err:?}").contains(key));
     }
 }

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 
+use std::io;
+
 use futures_util::{Stream, StreamExt};
 use genetlink::GenetlinkHandle;
 use netlink_packet_core::{
-    DecodeError, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_DUMP,
-    NLM_F_REQUEST,
+    DecodeError, ErrorMessage, NetlinkMessage, NetlinkPayload, NLM_F_ACK,
+    NLM_F_DUMP, NLM_F_REQUEST,
 };
 use netlink_packet_generic::GenlMessage;
 use netlink_packet_wireguard::{WireguardCmd, WireguardMessage};
@@ -134,12 +136,15 @@ fn parse_nl_msg_stream(
                 }
                 NetlinkPayload::Error(ref err) => Err(WireguardError::new(
                     ErrorKind::NetlinkError,
-                    format!("netlink error: {err:?}"),
+                    netlink_error_message(err),
                     Some(NetlinkMessage::new(header, payload)),
                 )),
                 _ => Err(WireguardError::new(
                     ErrorKind::Bug,
-                    format!("Unexpected NetlinkPayload type: {payload:?}"),
+                    format!(
+                        "Unexpected NetlinkPayload type: {}",
+                        payload_type(&payload)
+                    ),
                     Some(NetlinkMessage::new(header, payload)),
                 )),
             }
@@ -150,4 +155,31 @@ fn parse_nl_msg_stream(
             Some(nl_msg.clone()),
         )),
     })
+}
+
+/// Describe a netlink error by its errno.
+///
+/// The payload of an error is a copy of the request, it is attached to the
+/// [WireguardError] instead of being rendered into the message, so that key
+/// material of the request is redacted.
+fn netlink_error_message(err: &ErrorMessage) -> String {
+    match err.code {
+        Some(code) => format!(
+            "Netlink error: {}",
+            io::Error::from_raw_os_error(-code.get())
+        ),
+        None => "Netlink error: no error code".to_string(),
+    }
+}
+
+/// Name the type of `payload` without rendering its content.
+fn payload_type<I>(payload: &NetlinkPayload<I>) -> &'static str {
+    match payload {
+        NetlinkPayload::Done(_) => "Done",
+        NetlinkPayload::Error(_) => "Error",
+        NetlinkPayload::Noop => "Noop",
+        NetlinkPayload::Overrun(_) => "Overrun",
+        NetlinkPayload::InnerMessage(_) => "InnerMessage",
+        _ => "Unknown",
+    }
 }

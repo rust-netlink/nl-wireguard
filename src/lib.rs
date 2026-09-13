@@ -73,6 +73,7 @@ mod error;
 mod handle;
 mod parsed;
 mod peer_parsed;
+mod redact;
 
 #[cfg(feature = "tokio_socket")]
 pub use self::connection::new_connection;

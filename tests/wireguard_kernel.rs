@@ -17,6 +17,7 @@ use std::{
     process::Command,
 };
 
+use base64::prelude::{Engine, BASE64_STANDARD};
 use nl_wireguard::{
     WireguardHandle, WireguardIpAddress, WireguardParsed, WireguardPeerParsed,
 };
@@ -33,6 +34,9 @@ const PEER_PUBLIC_KEY: &str = "8bdQrVLqiw3ZoHCucNh1YfH0iCWuyStniRr8t7H24Fk=";
 
 /// Base64 encoded private key of the throwaway device.
 const DEVICE_PRIVATE_KEY: &str = "6LTHiAM4vgKEgi5vm30f/EBIEWFDmySkTc9EWCcIqEs=";
+
+/// Base64 encoded preshared key of the throwaway peer.
+const PRESHARED_KEY: &str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
 
 /// Test wireguard interface which is removed on drop.
 struct TestIface(&'static str);
@@ -65,6 +69,19 @@ async fn connect() -> WireguardHandle {
         nl_wireguard::new_connection().expect("failed to open netlink socket");
     tokio::spawn(connection);
     handle
+}
+
+fn key_bytes(key: &str) -> Vec<u8> {
+    BASE64_STANDARD.decode(key).expect("invalid base64 key")
+}
+
+/// Render bytes the way `Debug` renders a `[u8; 32]` or a `Vec<u8>`.
+fn byte_list(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| byte.to_string())
+        .collect::<Vec<String>>()
+        .join(", ")
 }
 
 fn peer_with_allowed_ips(count: u32) -> WireguardPeerParsed {
@@ -161,4 +178,34 @@ async fn get_by_name_result_can_be_applied_again() {
         .set(parsed)
         .await
         .expect("failed to apply the parsed config");
+}
+
+#[tokio::test]
+#[ignore = "needs root and the wireguard kernel module"]
+async fn keys_are_not_reported_in_errors() {
+    // An interface name longer than `IFNAMSIZ` is rejected by the kernel
+    // attribute policy, the error reply echoes the request back.
+    const TOO_LONG_IFACE_NAME: &str = "nlwgtest-too-long-name";
+    let mut handle = connect().await;
+
+    let mut peer = WireguardPeerParsed::default();
+    peer.public_key = Some(PEER_PUBLIC_KEY.to_string());
+    peer.preshared_key = Some(PRESHARED_KEY.to_string());
+
+    let mut config = WireguardParsed::default();
+    config.iface_name = Some(TOO_LONG_IFACE_NAME.to_string());
+    config.private_key = Some(DEVICE_PRIVATE_KEY.to_string());
+    config.peers = Some(vec![peer]);
+
+    let err = handle
+        .set(config)
+        .await
+        .expect_err("the kernel should reject the interface name");
+    let report = format!("{err:?}");
+
+    // The echoed request proves the kernel sent the request back.
+    assert!(report.contains(&byte_list(&key_bytes(PEER_PUBLIC_KEY))));
+    // The keys are redacted.
+    assert!(!report.contains(&byte_list(&key_bytes(DEVICE_PRIVATE_KEY))));
+    assert!(!report.contains(&byte_list(&key_bytes(PRESHARED_KEY))));
 }
