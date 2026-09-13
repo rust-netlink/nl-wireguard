@@ -197,6 +197,10 @@ impl From<Vec<WireguardMessage>> for WireguardParsed {
 const MAX_NLA_VALUE_LEN: usize =
     u16::MAX as usize - NLA_HEADER_SIZE - (NLA_ALIGNTO - 1);
 
+/// Maximum length of an interface name, `IFNAMSIZ` from
+/// `include/uapi/linux/if.h` includes the trailing NUL byte.
+const IFNAMSIZ: usize = 16;
+
 impl WireguardParsed {
     /// Build [WireguardMessage]
     ///
@@ -293,6 +297,27 @@ impl WireguardParsed {
         // `WGDEVICE_A_IFINDEX`, so the interface name wins when a parsed
         // config carries both, which is what `get_by_name()` returns.
         if let Some(iface_name) = self.iface_name.as_ref() {
+            if iface_name.len() >= IFNAMSIZ {
+                return Err(WireguardError::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "`iface_name` can not be longer than {} bytes, but \
+                         `{iface_name}` holds {} bytes",
+                        IFNAMSIZ - 1,
+                        iface_name.len()
+                    ),
+                    None,
+                ));
+            }
+            if iface_name.contains('\0') {
+                return Err(WireguardError::new(
+                    ErrorKind::InvalidInput,
+                    "`iface_name` can not hold a NUL byte, the kernel would \
+                     use the name in front of it"
+                        .to_string(),
+                    None,
+                ));
+            }
             Ok(WireguardAttribute::IfName(iface_name.to_string()))
         } else if let Some(iface_index) = self.iface_index {
             Ok(WireguardAttribute::IfIndex(iface_index))
@@ -611,6 +636,31 @@ mod tests {
             .build(WireguardCmd::GetDevice)
             .unwrap_err();
 
+        assert_eq!(err.kind, ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn iface_name_is_limited_to_ifnamsiz() {
+        // The kernel rejects a longer name with `-EINVAL`.
+        let longest = WireguardParsed {
+            iface_name: Some("a".repeat(IFNAMSIZ - 1)),
+            ..Default::default()
+        };
+        assert!(longest.build(WireguardCmd::GetDevice).is_ok());
+
+        let too_long = WireguardParsed {
+            iface_name: Some("a".repeat(IFNAMSIZ)),
+            ..Default::default()
+        };
+        let err = too_long.build(WireguardCmd::GetDevice).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidInput);
+
+        // The kernel would use the name in front of an embedded NUL.
+        let with_nul = WireguardParsed {
+            iface_name: Some("wg0\0wg1".to_string()),
+            ..Default::default()
+        };
+        let err = with_nul.build(WireguardCmd::GetDevice).unwrap_err();
         assert_eq!(err.kind, ErrorKind::InvalidInput);
     }
 

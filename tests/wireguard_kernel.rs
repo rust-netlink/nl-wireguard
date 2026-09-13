@@ -18,6 +18,12 @@ use std::{
 };
 
 use base64::prelude::{Engine, BASE64_STANDARD};
+use futures_util::StreamExt;
+use netlink_packet_core::{NLM_F_ACK, NLM_F_REQUEST};
+use netlink_packet_wireguard::{
+    WireguardAttribute, WireguardCmd, WireguardMessage, WireguardPeer,
+    WireguardPeerAttribute,
+};
 use nl_wireguard::{
     WireguardHandle, WireguardIpAddress, WireguardParsed, WireguardPeerParsed,
 };
@@ -37,6 +43,9 @@ const DEVICE_PRIVATE_KEY: &str = "6LTHiAM4vgKEgi5vm30f/EBIEWFDmySkTc9EWCcIqEs=";
 
 /// Base64 encoded preshared key of the throwaway peer.
 const PRESHARED_KEY: &str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+
+/// Interface name longer than `IFNAMSIZ`.
+const TOO_LONG_IFACE_NAME: &str = "nlwgtest-16-chars";
 
 /// Test wireguard interface which is removed on drop.
 struct TestIface(&'static str);
@@ -73,6 +82,12 @@ async fn connect() -> WireguardHandle {
 
 fn key_bytes(key: &str) -> Vec<u8> {
     BASE64_STANDARD.decode(key).expect("invalid base64 key")
+}
+
+fn key_array(key: &str) -> [u8; 32] {
+    let mut array = [0u8; 32];
+    array.copy_from_slice(&key_bytes(key));
+    array
 }
 
 /// Render bytes the way `Debug` renders a `[u8; 32]` or a `Vec<u8>`.
@@ -183,27 +198,36 @@ async fn get_by_name_result_can_be_applied_again() {
 #[tokio::test]
 #[ignore = "needs root and the wireguard kernel module"]
 async fn keys_are_not_reported_in_errors() {
-    // An interface name longer than `IFNAMSIZ` is rejected by the kernel
-    // attribute policy, the error reply echoes the request back.
-    const TOO_LONG_IFACE_NAME: &str = "nlwgtest-too-long-name";
     let mut handle = connect().await;
 
-    let mut peer = WireguardPeerParsed::default();
-    peer.public_key = Some(PEER_PUBLIC_KEY.to_string());
-    peer.preshared_key = Some(PRESHARED_KEY.to_string());
+    // A name longer than `IFNAMSIZ` is rejected by the kernel attribute
+    // policy before it parses the request, the error reply echoes the
+    // request with its keys back. The low level API is used because
+    // `WireguardHandle::set()` rejects such a name on the client side.
+    let message = WireguardMessage {
+        cmd: WireguardCmd::SetDevice,
+        attributes: vec![
+            WireguardAttribute::IfName(TOO_LONG_IFACE_NAME.to_string()),
+            WireguardAttribute::PrivateKey(key_array(DEVICE_PRIVATE_KEY)),
+            WireguardAttribute::Peers(vec![WireguardPeer(vec![
+                WireguardPeerAttribute::PublicKey(key_array(PEER_PUBLIC_KEY)),
+                WireguardPeerAttribute::PresharedKey(key_array(PRESHARED_KEY)),
+            ])]),
+        ],
+    };
 
-    let mut config = WireguardParsed::default();
-    config.iface_name = Some(TOO_LONG_IFACE_NAME.to_string());
-    config.private_key = Some(DEVICE_PRIVATE_KEY.to_string());
-    config.peers = Some(vec![peer]);
-
-    let err = handle
-        .set(config)
+    let mut stream = handle
+        .request(NLM_F_REQUEST | NLM_F_ACK, message)
         .await
+        .expect("failed to send the request");
+    let err = stream
+        .next()
+        .await
+        .expect("the kernel did not reply")
         .expect_err("the kernel should reject the interface name");
     let report = format!("{err:?}");
 
-    // The echoed request proves the kernel sent the request back.
+    // The reported request proves the kernel rejected this message.
     assert!(report.contains(&byte_list(&key_bytes(PEER_PUBLIC_KEY))));
     // The keys are redacted.
     assert!(!report.contains(&byte_list(&key_bytes(DEVICE_PRIVATE_KEY))));
