@@ -161,11 +161,11 @@ mod tests {
     fn echoed_requests_are_dropped() {
         // The kernel echoes the raw request in its error reply.
         let message = request_message();
-        let mut raw = vec![0u8; 16 + 4 + message.buffer_len()];
+        let mut raw = vec![0u8; 16 + 4];
         // `cmd` and `version` of the generic netlink header.
         raw[16] = 1;
         raw[17] = 1;
-        message.emit(&mut raw[20..]);
+        message.emit(&mut raw).unwrap();
 
         let mut error_message = ErrorMessage::default();
         error_message.code = NonZeroI32::new(-22);

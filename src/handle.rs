@@ -3,10 +3,10 @@
 use std::{io, sync::Arc};
 
 use futures_util::{future::ready, Stream, StreamExt};
-use genetlink::GenetlinkHandle;
+use genetlink::{GenetlinkError, GenetlinkHandle};
 use netlink_packet_core::{
-    DecodeError, ErrorMessage, NetlinkMessage, NetlinkPayload, NLM_F_ACK,
-    NLM_F_DUMP, NLM_F_REQUEST,
+    ErrorMessage, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_DUMP,
+    NLM_F_REQUEST,
 };
 use netlink_packet_generic::GenlMessage;
 use netlink_packet_wireguard::{WireguardCmd, WireguardMessage};
@@ -148,7 +148,7 @@ fn parse_nl_msg_stream(
     stream: impl Stream<
         Item = Result<
             NetlinkMessage<GenlMessage<WireguardMessage>>,
-            DecodeError,
+            GenetlinkError,
         >,
     >,
 ) -> impl Stream<Item = Result<WireguardMessage, WireguardError>> {
@@ -306,7 +306,7 @@ mod tests {
         request: NetlinkMsg,
         replies: Vec<NetlinkMsg>,
     ) -> Vec<Result<WireguardMessage, WireguardError>> {
-        let replies: Vec<Result<NetlinkMsg, DecodeError>> =
+        let replies: Vec<Result<NetlinkMsg, GenetlinkError>> =
             replies.into_iter().map(Ok).collect();
         parse_nl_msg_stream(request, stream::iter(replies))
             .collect()
@@ -397,11 +397,11 @@ mod tests {
     async fn error_does_not_report_keys() {
         let request = request_message();
         // The kernel echoes the raw request in its error reply.
-        let mut echoed = vec![0u8; 16 + 4 + request.buffer_len()];
+        let mut echoed = vec![0u8; 16 + 4];
         // `cmd` and `version` of the generic netlink header.
         echoed[16] = 1;
         echoed[17] = 1;
-        request.emit(&mut echoed[20..]);
+        request.emit(&mut echoed).unwrap();
 
         let mut error_message = ErrorMessage::default();
         error_message.code = NonZeroI32::new(-13);

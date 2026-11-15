@@ -25,12 +25,12 @@ async-std = { version = "1.13.0", optional = true}
 futures-util = "0.3.11"
 futures-channel = "0.3.11"
 log = "0.4.26"
-genetlink = { default-features = false, version = "0.3.1"}
-netlink-packet-core = { version = "0.9.0"}
-netlink-packet-generic = { version = "0.5.0" }
-netlink-packet-wireguard = { version = "0.5.0" }
-netlink-proto = { default-features = false, version = "0.14.1" }
-netlink-sys = { version = "0.9.0" }
+genetlink = { default-features = false, version = "1.0.0-rc2" }
+netlink-packet-core = { version = "1.0.0-rc2" }
+netlink-packet-generic = "1.0.0-rc2"
+netlink-packet-wireguard = { git = "https://github.com/rust-netlink/netlink-packet-wireguard", branch = "main" }
+netlink-proto = { default-features = false, version = "1.0.0-rc2" }
+netlink-sys = { version = "1.0.0-rc2" }
 tokio = { version = "1.44.0", features = ["rt"], optional = true}
 base64 = "0.22.0"
 

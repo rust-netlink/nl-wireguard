@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use base64::{prelude::BASE64_STANDARD, Engine};
-use netlink_packet_core::{Emitable, NLA_ALIGNTO, NLA_HEADER_SIZE};
+use netlink_packet_core::{Nla, NLA_HEADER_SIZE};
 use netlink_packet_wireguard::{
     WireguardAllowedIp, WireguardAttribute, WireguardCmd, WireguardDeviceFlags,
     WireguardMessage, WireguardPeer, WireguardPeerAttribute,
@@ -191,11 +191,21 @@ impl From<Vec<WireguardMessage>> for WireguardParsed {
     }
 }
 
+const NLA_ALIGNTO: usize = 4;
+
 /// The kernel encodes the length of a netlink attribute in a `u16`,
 /// therefore the value of one attribute is limited to this number of bytes
 /// once the attribute header and the 4 bytes alignment are accounted for.
 const MAX_NLA_VALUE_LEN: usize =
     u16::MAX as usize - NLA_HEADER_SIZE - (NLA_ALIGNTO - 1);
+
+/// Return the number of bytes `nla` occupies on the wire.
+fn nla_len<T: Nla>(nla: &T) -> usize {
+    let mut out = Vec::new();
+    nla.emit(&mut out)
+        .expect("failed to emit netlink attribute");
+    out.len()
+}
 
 /// Maximum length of an interface name, `IFNAMSIZ` from
 /// `include/uapi/linux/if.h` includes the trailing NUL byte.
@@ -244,7 +254,7 @@ impl WireguardParsed {
 
         for peer in self.peers.iter().flatten() {
             for chunk in peer_chunks(peer)? {
-                let chunk_len = chunk.buffer_len();
+                let chunk_len = nla_len(&chunk);
                 if !peers.is_empty()
                     && peers_len + chunk_len > MAX_NLA_VALUE_LEN
                 {
@@ -429,11 +439,8 @@ fn peer_chunks(
         ));
     }
 
-    let state_len = NLA_HEADER_SIZE
-        + state_attributes
-            .iter()
-            .map(Emitable::buffer_len)
-            .sum::<usize>();
+    let state_len =
+        NLA_HEADER_SIZE + state_attributes.iter().map(nla_len).sum::<usize>();
     let first_batch = take_allowed_ips_batch(&mut allowed_ips, state_len);
     let mut first_chunk = state_attributes;
     first_chunk.push(WireguardPeerAttribute::AllowedIps(first_batch));
@@ -442,7 +449,7 @@ fn peer_chunks(
     // The public key is the only state the kernel needs to find the peer
     // again in the following messages.
     let public_key = public_key.expect("checked above");
-    let continuation_len = NLA_HEADER_SIZE + public_key.buffer_len();
+    let continuation_len = NLA_HEADER_SIZE + nla_len(&public_key);
     while !allowed_ips.is_empty() {
         let batch = take_allowed_ips_batch(&mut allowed_ips, continuation_len);
         chunks.push(WireguardPeer(vec![
@@ -463,7 +470,7 @@ fn take_allowed_ips_batch(
     let mut len = prefix_len + NLA_HEADER_SIZE;
     let mut count = 0;
     for ip in ips.iter() {
-        let ip_len = ip.buffer_len();
+        let ip_len = nla_len(ip);
         if count > 0 && len + ip_len > MAX_NLA_VALUE_LEN {
             break;
         }
@@ -519,7 +526,7 @@ pub(crate) fn decode_key(
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use genetlink::message::RawGenlMessage;
+    use genetlink::RawGenlMessage;
     use netlink_packet_generic::GenlMessage;
     use netlink_packet_wireguard::{
         WireguardAddressFamily, WireguardAllowedIpAttr,
@@ -681,7 +688,7 @@ mod tests {
             ));
             for attr in &msg.attributes {
                 // The kernel encodes the length of an attribute in a `u16`.
-                assert!(attr.buffer_len() <= u16::MAX as usize);
+                assert!(nla_len(attr) <= u16::MAX as usize);
             }
 
             assert_eq!(iface_attributes(msg), (true, false));
